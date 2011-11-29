@@ -1,7 +1,7 @@
 --[[ <HCExtension>
 @name			IgnoreOnceVisitedSites
 @author			Inversion (yura.des@gmail.com)
-@version       2.0.2
+@version       2.1.0
 @description	Do not cache contents of very seldom visited sites
 @event			Init/on_Init
 @event			Options/on_Options
@@ -10,8 +10,11 @@
 </HCExtension> ]]
 
 -- Version history
+	-- 2.1.0 (29.11.11)
+		-- сделана поддержка кириллических доменов вида "яндекс.рф"
+		-- добавлено вывод даты последнего визита в читабельном виде в окне «Настройки расширения»
 	-- 2.0.2 (17.06.11)
-		-- Исправил влияние расширения на опцию «Только для GET-запросов». При включеном расширении, отключение этого флажка не влияло на кеширование POST-запросов, они всегда не сохранялись.
+		-- исправлено влияние расширения на опцию «Только для GET-запросов». При включеном расширении, отключение этого флажка не влияло на кеширование POST-запросов, они всегда не сохранялись.
 	-- 2.0.1 (01.06.11) — Improvements
 		-- расширения теперь находит свои файлы, если поместить его в отдельную папку
 		-- улучшена обработка запросов, теперь расширение не вызывается, если запрос берется из кэша, или был блокирован
@@ -134,8 +137,8 @@ function on_Options()
 	for domain, stats in pairs(DB) do
 		local lastdate = stats[1]
 		local visits = stats[2]
-																																									-- hc.put_to_log(domain..' : '..lastdate..' : '..visits)
-		table.insert(list, domain..' : '..lastdate..' : '..visits)
+																																									hc.put_to_log(domain..' : '..lastdate..os.date(' (%d/%m/%Y)',lastdate)..' : '..visits)
+		table.insert(list, domain..' : '..lastdate..os.date(' (%d/%m/%Y)',lastdate)..' : '..visits)
 	end
 	table.sort(list)
 	Memo1 = VCL.Memo(Form, "Memo1")
@@ -159,7 +162,7 @@ function onOkButtonClick(Sender)
 	hc.set_global_table_item(g_name, 'ini_daysBetweenVisits', tonumber(Edit2.text))
 	hc.set_global_table_item(g_name, 'ini_lastVisitAgeInMonthsToResetStats', tonumber(Edit3.text))
 	
-	-- обновляем глобальшую таблицу статистики
+	-- обновляем глобальную таблицу статистики
 	local DB = {}
 	local s
 	if Memo1:Count()>0 then list = Memo1:GetText() end
@@ -170,10 +173,11 @@ function onOkButtonClick(Sender)
 				s = list[i]
 				local pos = string.find(s, " : ")
 				local pos2 = string.find(s, " : ", pos+1)
+				local pos3 = string.find(s, " %(", pos+1)
 				local domain = string.sub(s, 0, pos-1)
-				local lastdate = tonumber(string.sub(s, pos+3, pos2-1))
+				local lastdate = tonumber(string.sub(s, pos+3, pos3-1))
 				local visits = tonumber(string.sub(s, pos2+3))
-																																										-- hc.put_to_log(domain..' : '..lastdate..' : '..visits)
+																																										hc.put_to_log(domain..' : '..lastdate..' : '..visits)
 				if domain and visits and lastdate then
 					DB[domain] = {lastdate, visits}
 				end
@@ -275,33 +279,30 @@ function on_BeforeRequestHeaderSend()
 		return
 	end
 	
-	-- рассматриваем запросы без Referrer, а если есть Referrer, то в относительно него
-		local fullReferrerDomain = nil
-		local referrerDomain = nil
+	-- рассматриваем запросы без Referrer, а если есть Referrer, то относительно него
 		local checkDomain = nil
+		
 		-- берем Referrer
 		local referrer = re.find(hc.request_header, [[[Rr]eferer: *([^ \r\n]+)]], 1)
 																																										hc.put_to_log('referrer='..tostring(referrer))
 		-- если есть Referrer, то рассматриваем его домен, если нет, то домен запроса
-		if referrer then
-			-- берем полный домен урла реферера
-			fullReferrerDomain = string.lower( re.find(referrer, [[://(?:www\.)?([^/:]+)]], 1) )
-																																										hc.put_to_log('fullReferrerDomain='..fullReferrerDomain)
-			-- берем основной домен (для "gol.habrahabr.ru" надо взять "habrahabr.ru")
-			referrerDomain = re.find(fullReferrerDomain, [[([^/:.]+\.[^/:.]{1,4}\.[^/:.]{1,4}\.[^/:.]{1,4}|[^/:.]+\.[^/:.]{1,4}\.[^/:.]{1,4}|[^/:.]+\.[^/:.]{1,4})$]], 1)
-																																										hc.put_to_log('referrerDomain='..referrerDomain)
-			checkDomain = referrerDomain
-			g_myMonitor_string = "Referrer "..checkDomain.." - "
-		else
-			-- берем полный домен урла запроса
-			local fullDomain = string.lower( re.find(hc.url, [[://(?:www\.)?([^/:]+)]], 1) )
+		local parseDomainString = referrer or hc.url
+																																										hc.put_to_log('parseDomainString='..tostring(parseDomainString))
+		-- берем полный домен урла реферера
+		fullDomain = string.lower( re.find(parseDomainString, [[://(?:www\.)?([^/:]+)]], 1) )
 																																										hc.put_to_log('fullDomain='..fullDomain)
-			-- берем основной домен
-			local domain = re.find(fullDomain, [[([^/:.]+\.[^/:.]{1,4}\.[^/:.]{1,4}\.[^/:.]{1,4}|[^/:.]+\.[^/:.]{1,4}\.[^/:.]{1,4}|[^/:.]+\.[^/:.]{1,4})$]], 1)
-																																										hc.put_to_log('domain='..domain)
-			checkDomain = domain
+		-- если обнаруживаем punycode (.xn--p1ai) — декодируем
+		if fullDomain:find("xn--") then 
+			fullDomain = decode_punycode(fullDomain)
+																																										hc.put_to_log('decoded fullDomain='..fullDomain)
 		end
-																																										hc.put_to_log('checkDomain='..checkDomain)
+		
+		-- берем основной домен (для "user.habrahabr.ru" надо взять "habrahabr.ru")
+		checkDomain = re.find(fullDomain, "([^/:.]+\.[^/:.]{1,4}\.[^/:.]{1,4}\.[^/:.]{1,5}|[^/:.]+\.[^/:.]{1,4}\.[^/:.]{1,5}|[^/:.]+\.[^/:.]{1,5})$", 1)
+																																										hc.put_to_log('checkDomain='..tostring(checkDomain))
+		if referrer then
+			g_myMonitor_string = "Referrer "..checkDomain.." - "
+		end
 		
 	local domain_stats = hc.get_global_table_item(g_name..'DB', checkDomain)
 	-- если домен есть в базе
@@ -347,9 +348,22 @@ function on_BeforeRequestHeaderSend()
 	end -- if  домен есть в базе
 	
 	-- если давно не сохранялись — сохраняемся
-	if hc.get_global_table_item(g_name, 'ini_lastSaveTime') < os.time()-g_saveEvery  then
+	if hc.get_global_table_item(g_name, 'ini_lastSaveTime') < os.time()-g_saveEvery then
 		saveData()
 	end
 end
 
 
+function decode_punycode(str)
+	-- "xn--80a1acny.xn--p1ai"
+	local result = {}
+	--local arr = str.split('.')
+	for part in str:gmatch("[^.]+") do
+		if part:find("xn--") then
+			table.insert(result, hc.recode(part:sub(4), 1251+200000, 1251))
+		else
+			table.insert(result, part)
+		end
+	end
+	return table.concat(result, ".")
+end
